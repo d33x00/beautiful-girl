@@ -1,0 +1,83 @@
+--!strict
+-- Wspólna konfiguracja matchmakingu. Używana przez serwer (walidacja) i klienta (UI).
+
+export type Mode = {
+	Id: string,
+	DisplayName: string,
+	RequiredWins: number,
+	Color: Color3,
+}
+
+local Config = {}
+
+-- PlaceId miejsca z rozgrywką (musi być w tym samym Experience co lobby).
+-- Można nadpisać per pad atrybutem "PlaceId" na modelu Matchmaking.
+Config.GamePlaceId = 0
+
+-- Nazwa mapy w oknie "Create Party" i na padzie. Atrybut "MapName" na modelu nadpisuje.
+Config.MapName = "FARMHOUSE"
+
+-- Obrazek w tle okna "Create Party" (np. "rbxassetid://123"). Pusty = ciemny gradient.
+-- Atrybut "MapImage" na modelu nadpisuje.
+Config.MapImage = ""
+
+-- Maksymalny rozmiar party. Atrybut "MaxPlayers" na modelu nadpisuje.
+Config.MaxPartySize = 4
+
+-- Rozmiar party zaznaczony domyślnie po otwarciu okna.
+Config.DefaultPartySize = 1
+
+-- Tryby gry. Pierwszy odblokowany jest zaznaczany domyślnie.
+Config.Modes = {
+	{ Id = "Normal", DisplayName = "NORMAL", RequiredWins = 0, Color = Color3.fromRGB(0, 122, 255) },
+	{ Id = "Hard", DisplayName = "HARD", RequiredWins = 1, Color = Color3.fromRGB(214, 48, 49) },
+} :: { Mode }
+
+-- Czasy (sekundy).
+Config.CreateTimeout = 30 -- ile założyciel ma na kliknięcie CREATE
+Config.LobbyCountdown = 20 -- odliczanie po utworzeniu party
+Config.FullCountdown = 5 -- odliczanie, gdy party jest pełne
+Config.ReentryCooldown = 2 -- blokada ponownego wejścia na pad po wyjściu/odrzuceniu
+Config.TeleportTimeout = 30 -- po tylu sekundach nieudany teleport zwalnia gracza
+
+Config.TeleportRetries = 3
+
+-- Modele w Workspace o nazwach Matchmaking, Matchmaking1, Matchmaking 2, Matchmaking_3 itd.
+Config.ModelNamePattern = "^matchmaking[%s_%-]*%d*$"
+
+-- Nazwy części (małymi literami), które są traktowane jako strefa padu.
+-- Bez takiej części używany jest PrimaryPart albo największa płaska część modelu.
+Config.PadPartNames = { "pad", "zone", "hitbox", "circle", "touch" }
+
+-- Liczba wygranych gracza. Domyślnie leaderstats.Wins albo atrybut "Wins" na graczu.
+-- Podmień, jeśli trzymasz wygrane gdzie indziej (wartość musi być widoczna też na kliencie).
+function Config.GetWins(player: Player): number
+	local leaderstats = player:FindFirstChild("leaderstats")
+	local wins = leaderstats and leaderstats:FindFirstChild("Wins")
+	if wins and wins:IsA("IntValue") then
+		return wins.Value
+	elseif wins and wins:IsA("NumberValue") then
+		return wins.Value
+	end
+	local attribute = player:GetAttribute("Wins")
+	return if typeof(attribute) == "number" then attribute else 0
+end
+
+function Config.GetMode(modeId: string): Mode?
+	for _, mode in Config.Modes do
+		if mode.Id == modeId then
+			return mode
+		end
+	end
+	return nil
+end
+
+function Config.IsModeUnlocked(player: Player, mode: Mode): boolean
+	return Config.GetWins(player) >= mode.RequiredWins
+end
+
+function Config.FormatRequirement(mode: Mode): string
+	return `{mode.RequiredWins} Win{if mode.RequiredWins == 1 then "" else "s"}`
+end
+
+return Config

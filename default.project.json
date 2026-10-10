@@ -1,0 +1,23 @@
+{
+  "name": "Lobby",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "MatchmakingConfig": {
+        "$path": "src/lobby/ReplicatedStorage/MatchmakingConfig.lua"
+      }
+    },
+    "ServerScriptService": {
+      "Matchmaking": {
+        "$path": "src/lobby/ServerScriptService/Matchmaking"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "MatchmakingClient": {
+          "$path": "src/lobby/StarterPlayer/StarterPlayerScripts/MatchmakingClient"
+        }
+      }
+    }
+  }
+}
