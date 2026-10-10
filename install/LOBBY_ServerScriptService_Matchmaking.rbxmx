@@ -1,0 +1,691 @@
+<roblox version="4">
+  <Item class="Script" referent="0">
+    <Properties>
+      <string name="Name">Matchmaking</string>
+      <token name="RunContext">0</token>
+      <string name="Source"><![CDATA[--!strict
+-- Serwer matchmakingu w lobby.
+-- Gracz wchodzi na pusty pad -> okno "Create Party" (tryb + rozmiar) -> CREATE.
+-- Inni wchodzą na pad, żeby dołączyć. Po odliczaniu cała party leci na prywatny serwer gry.
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Workspace = game:GetService("Workspace")
+
+-- Tworzy leaderstats.Wins z DataStore (z nich Config.GetWins czyta odblokowane tryby).
+require(ServerScriptService:WaitForChild("PlayerStats"))
+local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
+local Pad = require(script.Pad)
+local Teleporter = require(script.Teleporter)
+
+type Pad = Pad.Pad
+
+local POLL_INTERVAL = 0.2
+
+-- Remotes -------------------------------------------------------------------
+
+local remotes = Instance.new("Folder")
+remotes.Name = "MatchmakingRemotes"
+
+local function remote(name: string): RemoteEvent
+	local event = Instance.new("RemoteEvent")
+	event.Name = name
+	event.Parent = remotes
+	return event
+end
+
+local OpenCreate = remote("OpenCreate") -- S->C (padId, padInfo)
+local CloseCreate = remote("CloseCreate") -- S->C ()
+local PartyUpdate = remote("PartyUpdate") -- S->C (partyInfo | nil)
+local Notify = remote("Notify") -- S->C (message)
+local CreateParty = remote("CreateParty") -- C->S (padId, modeId, size)
+local CancelCreate = remote("CancelCreate") -- C->S (padId)
+local LeaveParty = remote("LeaveParty") -- C->S ()
+remotes.Parent = ReplicatedStorage
+
+-- Stan ----------------------------------------------------------------------
+
+local pads: { Pad } = {}
+local padsById: { [string]: Pad } = {}
+local playerPad: { [Player]: Pad } = {}
+local cooldownUntil: { [Player]: number } = {}
+local teleporting: { [Player]: { Since: number, Pad: Pad } } = {}
+local lastBroadcast: { [Pad]: number } = {}
+
+local function rootPart(player: Player): BasePart?
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not character or not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+	return character.PrimaryPart
+end
+
+local function partyInfo(pad: Pad)
+	local mode = pad.ModeId and Config.GetMode(pad.ModeId)
+	return {
+		PadId = pad.Id,
+		MapName = pad.MapName,
+		ModeName = if mode then mode.DisplayName else "",
+		Count = #pad.Members,
+		Size = pad.Size,
+		TimeLeft = pad:TimeLeft(),
+		Status = pad.State,
+	}
+end
+
+local function broadcast(pad: Pad)
+	pad:Refresh()
+	lastBroadcast[pad] = pad:TimeLeft()
+	local info = partyInfo(pad)
+	for _, member in pad.Members do
+		PartyUpdate:FireClient(member, info)
+	end
+end
+
+local function reject(player: Player, pad: Pad, message: string)
+	Notify:FireClient(player, message)
+	pad:PushOut(player.Character)
+	cooldownUntil[player] = os.clock() + Config.ReentryCooldown
+end
+
+-- Usuwa gracza z padu, na którym stoi (wyjście ze strefy, BACK, LEAVE, śmierć, wyjście z gry).
+local function removeFromPad(player: Player, pushOut: boolean)
+	local pad = playerPad[player]
+	if not pad then
+		return
+	end
+	playerPad[player] = nil
+	cooldownUntil[player] = os.clock() + Config.ReentryCooldown
+	if pushOut then
+		pad:PushOut(player.Character)
+	end
+
+	if pad.State == "Creating" and pad.Owner == player then
+		CloseCreate:FireClient(player)
+		pad:Reset()
+	elseif pad.State == "Waiting" then
+		local index = table.find(pad.Members, player)
+		if index then
+			table.remove(pad.Members, index)
+		end
+		PartyUpdate:FireClient(player, nil)
+		if #pad.Members == 0 then
+			pad:Reset()
+		else
+			broadcast(pad)
+		end
+	end
+end
+
+local function releaseTeleporting(player: Player, message: string)
+	local entry = teleporting[player]
+	if not entry then
+		return
+	end
+	teleporting[player] = nil
+	Teleporter.Cancel(player)
+	cooldownUntil[player] = os.clock() + Config.ReentryCooldown
+	if player.Parent == Players then
+		entry.Pad:PushOut(player.Character)
+		PartyUpdate:FireClient(player, nil)
+		Notify:FireClient(player, message)
+	end
+end
+
+Teleporter.OnPlayerFailed = releaseTeleporting
+
+local function startTeleport(pad: Pad)
+	pad.State = "Teleporting"
+	local members = table.clone(pad.Members)
+	local now = os.clock()
+	for _, member in members do
+		playerPad[member] = nil
+		teleporting[member] = { Since = now, Pad = pad }
+	end
+	broadcast(pad)
+
+	local playerIds = {}
+	for _, member in members do
+		table.insert(playerIds, member.UserId)
+	end
+	local matchData = {
+		MatchId = HttpService:GenerateGUID(false),
+		Mode = pad.ModeId,
+		MapName = pad.MapName,
+		PartySize = pad.Size,
+		PlayerIds = playerIds,
+		LobbyPlaceId = game.PlaceId,
+		CreatedAt = os.time(),
+	}
+
+	task.spawn(function()
+		local ok, message = Teleporter.TeleportParty(members, pad.PlaceId, matchData)
+		if not ok then
+			warn("[Matchmaking]", message)
+			for _, member in members do
+				releaseTeleporting(member, message or "Teleport failed.")
+			end
+		else
+			-- Gracze są oznaczeni jako teleportowani, więc nie odpalą padu ponownie.
+			task.wait(3)
+		end
+		pad:Reset()
+	end)
+end
+
+local function onEnter(player: Player, pad: Pad)
+	if pad.State == "Idle" then
+		pad.State = "Creating"
+		pad.Owner = player
+		pad.Deadline = os.clock() + Config.CreateTimeout
+		playerPad[player] = pad
+		pad:Refresh()
+		OpenCreate:FireClient(player, pad.Id, {
+			MapName = pad.MapName,
+			MapImage = pad.MapImage,
+			MaxPlayers = pad.MaxPlayers,
+		})
+	elseif pad.State == "Creating" then
+		reject(player, pad, "Someone is creating a party here.")
+	elseif pad.State == "Waiting" then
+		local mode = pad.ModeId and Config.GetMode(pad.ModeId)
+		if #pad.Members >= pad.Size then
+			reject(player, pad, "This party is full.")
+		elseif mode and not Config.IsModeUnlocked(player, mode) then
+			reject(player, pad, `You need {Config.FormatRequirement(mode)} to play {mode.DisplayName}.`)
+		else
+			table.insert(pad.Members, player)
+			playerPad[player] = pad
+			if #pad.Members >= pad.Size then
+				pad.Deadline = math.min(pad.Deadline, os.clock() + Config.FullCountdown)
+			end
+			broadcast(pad)
+		end
+	else
+		reject(player, pad, "This party is already starting.")
+	end
+end
+
+-- Remote handlers -----------------------------------------------------------
+
+CreateParty.OnServerEvent:Connect(function(player, padId, modeId, size)
+	if typeof(padId) ~= "string" or typeof(modeId) ~= "string" or typeof(size) ~= "number" then
+		return
+	end
+	local pad = padsById[padId]
+	if not pad or pad.State ~= "Creating" or pad.Owner ~= player or playerPad[player] ~= pad then
+		return
+	end
+	local mode = Config.GetMode(modeId)
+	if not mode then
+		return
+	end
+	if not Config.IsModeUnlocked(player, mode) then
+		Notify:FireClient(player, `You need {Config.FormatRequirement(mode)} to play {mode.DisplayName}.`)
+		return
+	end
+	if size ~= size or size % 1 ~= 0 or size < 1 or size > pad.MaxPlayers then
+		return
+	end
+
+	pad.State = "Waiting"
+	pad.Owner = nil
+	pad.ModeId = mode.Id
+	pad.Size = size
+	pad.Members = { player }
+	pad.Deadline = os.clock() + if size == 1 then Config.FullCountdown else Config.LobbyCountdown
+	broadcast(pad)
+end)
+
+CancelCreate.OnServerEvent:Connect(function(player, padId)
+	local pad = playerPad[player]
+	if pad and pad.Id == padId and pad.State == "Creating" and pad.Owner == player then
+		removeFromPad(player, true)
+	end
+end)
+
+LeaveParty.OnServerEvent:Connect(function(player)
+	local pad = playerPad[player]
+	if pad and pad.State == "Waiting" then
+		removeFromPad(player, true)
+	end
+end)
+
+-- Pady ----------------------------------------------------------------------
+
+local function isInsideRegisteredPad(model: Model): boolean
+	for _, pad in pads do
+		if model:IsDescendantOf(pad.Model) then
+			return true
+		end
+	end
+	return false
+end
+
+local function tryRegister(instance: Instance)
+	if not instance:IsA("Model") or not string.find(string.lower(instance.Name), Config.ModelNamePattern) then
+		return
+	end
+	if isInsideRegisteredPad(instance) then
+		return
+	end
+	for _, pad in pads do
+		if pad.Model == instance then
+			return
+		end
+	end
+
+	local id = `Pad{#pads + 1}`
+	local pad = Pad.new(instance, id)
+	if not pad then
+		warn(`[Matchmaking] {instance:GetFullName()} has no BasePart to use as a pad, skipping.`)
+		return
+	end
+	table.insert(pads, pad)
+	padsById[id] = pad
+	print(`[Matchmaking] Registered {instance:GetFullName()} (zone: {pad.Part.Name}, max {pad.MaxPlayers}).`)
+end
+
+for _, instance in Workspace:GetDescendants() do
+	tryRegister(instance)
+end
+Workspace.DescendantAdded:Connect(tryRegister)
+
+if #pads == 0 then
+	warn("[Matchmaking] No Matchmaking models found in Workspace.")
+end
+
+-- Pętla: wykrywanie wejścia/wyjścia ze strefy i odliczanie ---------------------
+
+Players.PlayerRemoving:Connect(function(player)
+	removeFromPad(player, false)
+	cooldownUntil[player] = nil
+	teleporting[player] = nil
+end)
+
+while true do
+	task.wait(POLL_INTERVAL)
+	local now = os.clock()
+
+	for _, player in Players:GetPlayers() do
+		local entry = teleporting[player]
+		if entry then
+			if now - entry.Since > Config.TeleportTimeout then
+				releaseTeleporting(player, "Teleport timed out. Try again.")
+			end
+			continue
+		end
+
+		local root = rootPart(player)
+		local current = playerPad[player]
+		if current then
+			if not root or not current:Contains(root.Position) then
+				removeFromPad(player, false)
+			end
+		elseif root and (cooldownUntil[player] or 0) <= now then
+			for _, pad in pads do
+				if pad:Contains(root.Position) then
+					onEnter(player, pad)
+					break
+				end
+			end
+		end
+	end
+
+	for _, pad in pads do
+		if pad.State == "Creating" and now >= pad.Deadline then
+			local owner = pad.Owner
+			if owner then
+				Notify:FireClient(owner, "Party creation timed out.")
+				removeFromPad(owner, true)
+			else
+				pad:Reset()
+			end
+		elseif pad.State == "Waiting" then
+			if now >= pad.Deadline then
+				startTeleport(pad)
+			elseif lastBroadcast[pad] ~= pad:TimeLeft() then
+				broadcast(pad)
+			end
+		end
+	end
+end
+]]></string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">Pad</string>
+        <string name="Source"><![CDATA[--!strict
+-- Jeden pad matchmakingu (model Matchmaking1..4): strefa, stan party i billboard "0/4".
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
+
+export type State = "Idle" | "Creating" | "Waiting" | "Teleporting"
+
+local Pad = {}
+Pad.__index = Pad
+
+export type Pad = typeof(setmetatable(
+	{} :: {
+		Id: string,
+		Model: Model,
+		Part: BasePart,
+		MapName: string,
+		MapImage: string,
+		MaxPlayers: number,
+		PlaceId: number,
+		State: State,
+		Owner: Player?,
+		Members: { Player },
+		ModeId: string?,
+		Size: number,
+		Deadline: number,
+		_countLabel: TextLabel,
+		_statusLabel: TextLabel,
+	},
+	Pad
+))
+
+local function worldExtents(part: BasePart): Vector3
+	local cf, size = part.CFrame, part.Size
+	local x, y, z = cf.XVector, cf.YVector, cf.ZVector
+	return Vector3.new(
+		math.abs(x.X) * size.X + math.abs(y.X) * size.Y + math.abs(z.X) * size.Z,
+		math.abs(x.Y) * size.X + math.abs(y.Y) * size.Y + math.abs(z.Y) * size.Z,
+		math.abs(x.Z) * size.X + math.abs(y.Z) * size.Y + math.abs(z.Z) * size.Z
+	)
+end
+
+local function findZonePart(model: Model): BasePart?
+	local named: { [string]: boolean } = {}
+	for _, name in Config.PadPartNames do
+		named[name] = true
+	end
+
+	local flattest: BasePart? = nil
+	local flattestArea = 0
+	for _, descendant in model:GetDescendants() do
+		if not descendant:IsA("BasePart") then
+			continue
+		end
+		if descendant:GetAttribute("MatchmakingPad") == true or named[string.lower(descendant.Name)] then
+			return descendant
+		end
+		local extents = worldExtents(descendant)
+		local area = extents.X * extents.Z
+		if extents.Y < math.min(extents.X, extents.Z) / 2 and area > flattestArea then
+			flattest, flattestArea = descendant, area
+		end
+	end
+	return model.PrimaryPart or flattest
+end
+
+local function attribute<T>(model: Model, name: string, kind: string, default: T): T
+	local value = model:GetAttribute(name)
+	if typeof(value) == kind then
+		return (value :: any) :: T
+	end
+	return default
+end
+
+local function label(parent: Instance, name: string, font: Enum.Font, position: UDim2, size: UDim2): TextLabel
+	local text = Instance.new("TextLabel")
+	text.Name = name
+	text.BackgroundTransparency = 1
+	text.Position = position
+	text.Size = size
+	text.Font = font
+	text.TextScaled = true
+	text.TextColor3 = Color3.new(1, 1, 1)
+	text.TextStrokeTransparency = 0.4
+	text.Parent = parent
+	return text
+end
+
+function Pad.new(model: Model, id: string): Pad?
+	local part = findZonePart(model)
+	if not part then
+		return nil
+	end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "MatchmakingBillboard"
+	billboard.Adornee = part
+	billboard.Size = UDim2.fromScale(10, 3.6) -- w studach, skaluje się z odległością
+	billboard.StudsOffsetWorldSpace = Vector3.new(0, worldExtents(part).Y / 2 + 4.5, 0)
+	billboard.LightInfluence = 0
+	billboard.MaxDistance = 120
+	local countLabel = label(billboard, "Count", Enum.Font.FredokaOne, UDim2.new(), UDim2.fromScale(1, 0.58))
+	local statusLabel =
+		label(billboard, "Status", Enum.Font.SpecialElite, UDim2.fromScale(0, 0.6), UDim2.fromScale(1, 0.4))
+	billboard.Parent = part
+
+	local maxPlayers = math.clamp(math.floor(attribute(model, "MaxPlayers", "number", Config.MaxPartySize)), 1, 50)
+	local self = setmetatable({
+		Id = id,
+		Model = model,
+		Part = part,
+		MapName = attribute(model, "MapName", "string", Config.MapName),
+		MapImage = attribute(model, "MapImage", "string", Config.MapImage),
+		MaxPlayers = maxPlayers,
+		PlaceId = attribute(model, "PlaceId", "number", Config.GamePlaceId),
+		State = "Idle" :: State,
+		Owner = nil :: Player?,
+		Members = {} :: { Player },
+		ModeId = nil :: string?,
+		Size = maxPlayers,
+		Deadline = 0,
+		_countLabel = countLabel,
+		_statusLabel = statusLabel,
+	}, Pad)
+	self:Refresh()
+	return self
+end
+
+-- Czy pozycja (HumanoidRootPart) stoi w kole padu.
+function Pad.Contains(self: Pad, position: Vector3): boolean
+	local extents = worldExtents(self.Part)
+	local center = self.Part.Position
+	local radius = math.min(extents.X, extents.Z) / 2
+	local top = center.Y + extents.Y / 2
+	local offset = Vector3.new(position.X - center.X, 0, position.Z - center.Z)
+	return offset.Magnitude <= radius and position.Y >= top - 3 and position.Y <= top + 10
+end
+
+-- Wypycha postać poza krawędź padu, żeby nie odpalała go ponownie.
+function Pad.PushOut(self: Pad, character: Model?)
+	if not character or not character.PrimaryPart then
+		return
+	end
+	local extents = worldExtents(self.Part)
+	local center = self.Part.Position
+	local offset = character.PrimaryPart.Position - center
+	local direction = Vector3.new(offset.X, 0, offset.Z)
+	direction = if direction.Magnitude > 0.1 then direction.Unit else Vector3.xAxis
+	local target = center
+		+ direction * (math.max(extents.X, extents.Z) / 2 + 4)
+		+ Vector3.yAxis * (extents.Y / 2 + 3)
+	character:PivotTo(CFrame.lookAt(target, target + direction))
+end
+
+function Pad.TimeLeft(self: Pad): number
+	return math.max(0, math.ceil(self.Deadline - os.clock()))
+end
+
+function Pad.Refresh(self: Pad)
+	local mode = self.ModeId and Config.GetMode(self.ModeId)
+	local modeName = if mode then mode.DisplayName else ""
+	if self.State == "Idle" then
+		self._countLabel.Text = `0/{self.MaxPlayers}`
+		self._statusLabel.Text = "Touch to create a party"
+	elseif self.State == "Creating" then
+		self._countLabel.Text = `0/{self.MaxPlayers}`
+		self._statusLabel.Text = `{if self.Owner then self.Owner.DisplayName else "Someone"} is creating a party...`
+	elseif self.State == "Waiting" then
+		self._countLabel.Text = `{#self.Members}/{self.Size}`
+		self._statusLabel.Text = `{modeName} • Starting in {self:TimeLeft()}s`
+	else
+		self._countLabel.Text = `{#self.Members}/{self.Size}`
+		self._statusLabel.Text = `{modeName} • Teleporting...`
+	end
+end
+
+function Pad.Reset(self: Pad)
+	self.State = "Idle"
+	self.Owner = nil
+	self.Members = {}
+	self.ModeId = nil
+	self.Size = self.MaxPlayers
+	self.Deadline = 0
+	self:Refresh()
+end
+
+return Pad
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="2">
+      <Properties>
+        <string name="Name">Teleporter</string>
+        <string name="Source"><![CDATA[--!strict
+-- Teleport party do prywatnego (zarezerwowanego) serwera w miejscu gry.
+-- Dane meczu trafiają do MemoryStore pod PrivateServerId, więc serwer gry może im ufać
+-- (TeleportData idzie przez klienta i służy tylko jako zapas).
+
+local MemoryStoreService = game:GetService("MemoryStoreService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+
+local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
+
+-- Ta sama nazwa musi być w skrypcie MatchLoader w miejscu gry.
+local MATCHES_MAP = "MatchmakingMatches"
+local MATCH_TTL = 60 * 60
+
+type Pending = { PlaceId: number, Options: TeleportOptions, Attempts: number }
+
+local Teleporter = {}
+
+-- Wywoływane, gdy teleport gracza ostatecznie się nie powiódł (ustawiane przez skrypt główny).
+Teleporter.OnPlayerFailed = function(_player: Player, _message: string) end
+
+local matches = MemoryStoreService:GetSortedMap(MATCHES_MAP)
+local pending: { [Player]: Pending } = {}
+
+local function retry(attempts: number, callback: () -> ...any): (boolean, ...any)
+	local lastError: any
+	for attempt = 1, attempts do
+		local result = table.pack(pcall(callback))
+		if result[1] then
+			return true, table.unpack(result, 2, result.n)
+		end
+		lastError = result[2]
+		if attempt < attempts then
+			task.wait(attempt * 2)
+		end
+	end
+	return false, lastError
+end
+
+-- Zwraca true, gdy teleport został zainicjowany. Pojedyncze porażki graczy
+-- przychodzą później przez Teleporter.OnPlayerFailed.
+function Teleporter.TeleportParty(players: { Player }, placeId: number, matchData: { [string]: any }): (boolean, string?)
+	if placeId == 0 then
+		return false, "Game PlaceId is not set (MatchmakingConfig.GamePlaceId)."
+	end
+	if RunService:IsStudio() then
+		return false, "Teleport works only in a published game, not in Studio."
+	end
+
+	local reserved, accessCode, privateServerId = retry(Config.TeleportRetries, function()
+		return TeleportService:ReserveServer(placeId)
+	end)
+	if not reserved then
+		warn("[Matchmaking] ReserveServer failed:", accessCode)
+		return false, "Could not reserve a server. Try again."
+	end
+
+	local saved, saveError = pcall(function()
+		matches:SetAsync(privateServerId, matchData, MATCH_TTL)
+	end)
+	if not saved then
+		warn("[Matchmaking] Could not save match data, game server will fall back to TeleportData:", saveError)
+	end
+
+	local options = Instance.new("TeleportOptions")
+	options.ReservedServerAccessCode = accessCode
+	options:SetTeleportData(matchData)
+
+	local present = {}
+	for _, player in players do
+		if player.Parent == Players then
+			table.insert(present, player)
+			pending[player] = { PlaceId = placeId, Options = options, Attempts = 0 }
+		end
+	end
+	if #present == 0 then
+		return false, "Everyone left the party."
+	end
+
+	local teleported, teleportError = retry(Config.TeleportRetries, function()
+		return TeleportService:TeleportAsync(placeId, present, options)
+	end)
+	if not teleported then
+		for _, player in present do
+			pending[player] = nil
+		end
+		warn("[Matchmaking] TeleportAsync failed:", teleportError)
+		return false, "Teleport failed. Try again."
+	end
+	return true, nil
+end
+
+-- Zapomina oczekujący teleport (np. po przekroczeniu Config.TeleportTimeout).
+function Teleporter.Cancel(player: Player)
+	pending[player] = nil
+end
+
+TeleportService.TeleportInitFailed:Connect(function(player, result, message)
+	local entry = pending[player]
+	if not entry or result == Enum.TeleportResult.IsTeleporting then
+		return
+	end
+
+	local retryable = result == Enum.TeleportResult.Flooded or result == Enum.TeleportResult.Failure
+	if retryable and entry.Attempts < Config.TeleportRetries then
+		entry.Attempts += 1
+		task.wait(entry.Attempts * 2)
+		if pending[player] ~= entry or player.Parent ~= Players then
+			return
+		end
+		local ok, err = pcall(function()
+			TeleportService:TeleportAsync(entry.PlaceId, { player }, entry.Options)
+		end)
+		if ok then
+			return
+		end
+		message = tostring(err)
+	end
+
+	pending[player] = nil
+	warn(`[Matchmaking] Teleport of {player.Name} failed ({result.Name}): {message}`)
+	Teleporter.OnPlayerFailed(player, "Teleport failed. Try again.")
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	pending[player] = nil
+end)
+
+return Teleporter
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

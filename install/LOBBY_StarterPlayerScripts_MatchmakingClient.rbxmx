@@ -1,0 +1,623 @@
+<roblox version="4">
+  <Item class="LocalScript" referent="0">
+    <Properties>
+      <string name="Name">MatchmakingClient</string>
+      <string name="Source"><![CDATA[--!strict
+-- Klient matchmakingu: reaguje na zdarzenia serwera i obsługuje okno "Create Party".
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
+local MatchmakingUI = require(script:WaitForChild("MatchmakingUI"))
+
+local player = Players.LocalPlayer
+local remotes = ReplicatedStorage:WaitForChild("MatchmakingRemotes")
+local OpenCreate = remotes:WaitForChild("OpenCreate") :: RemoteEvent
+local CloseCreate = remotes:WaitForChild("CloseCreate") :: RemoteEvent
+local PartyUpdate = remotes:WaitForChild("PartyUpdate") :: RemoteEvent
+local Notify = remotes:WaitForChild("Notify") :: RemoteEvent
+local CreateParty = remotes:WaitForChild("CreateParty") :: RemoteEvent
+local CancelCreate = remotes:WaitForChild("CancelCreate") :: RemoteEvent
+local LeaveParty = remotes:WaitForChild("LeaveParty") :: RemoteEvent
+
+local view: MatchmakingUI.CreateView = {
+	MapName = Config.MapName,
+	MapImage = Config.MapImage,
+	SelectedModeId = nil,
+	Size = Config.DefaultPartySize,
+	MaxPlayers = Config.MaxPartySize,
+	Wins = 0,
+}
+local padId: string? = nil
+local busy = false
+
+local ui: MatchmakingUI.MatchmakingUI
+
+local function setBusy(value: boolean)
+	busy = value
+	ui:SetCreateBusy(value)
+end
+
+ui = MatchmakingUI.new(player:WaitForChild("PlayerGui"), {
+	OnModeClicked = function(mode)
+		if not Config.IsModeUnlocked(player, mode) then
+			ui:Toast(`Win {Config.FormatRequirement(mode)} to unlock {mode.DisplayName}.`)
+			return
+		end
+		view.SelectedModeId = mode.Id
+		ui:RenderCreate(view)
+	end,
+	OnSizeChanged = function(delta)
+		view.Size = math.clamp(view.Size + delta, 1, view.MaxPlayers)
+		ui:RenderCreate(view)
+	end,
+	OnCreate = function()
+		if busy or not padId or not view.SelectedModeId then
+			return
+		end
+		setBusy(true)
+		CreateParty:FireServer(padId, view.SelectedModeId, view.Size)
+		-- Jeśli serwer odrzuci prośbę, odblokuj przycisk.
+		task.delay(2, function()
+			if busy then
+				setBusy(false)
+			end
+		end)
+	end,
+	OnBack = function()
+		if padId then
+			CancelCreate:FireServer(padId)
+		end
+		padId = nil
+		ui:CloseCreate()
+	end,
+	OnLeave = function()
+		LeaveParty:FireServer()
+	end,
+})
+
+OpenCreate.OnClientEvent:Connect(function(id: string, info: { MapName: string, MapImage: string, MaxPlayers: number })
+	padId = id
+	view.MapName = info.MapName
+	view.MapImage = info.MapImage
+	view.MaxPlayers = info.MaxPlayers
+	view.Size = math.clamp(Config.DefaultPartySize, 1, info.MaxPlayers)
+	view.Wins = Config.GetWins(player)
+	view.SelectedModeId = nil
+	for _, mode in Config.Modes do
+		if Config.IsModeUnlocked(player, mode) then
+			view.SelectedModeId = mode.Id
+			break
+		end
+	end
+	setBusy(false)
+	ui:OpenCreate(view)
+end)
+
+CloseCreate.OnClientEvent:Connect(function()
+	padId = nil
+	ui:CloseCreate()
+end)
+
+PartyUpdate.OnClientEvent:Connect(function(info: MatchmakingUI.PartyView?)
+	if info then
+		padId = nil
+		setBusy(false)
+		ui:CloseCreate()
+		ui:ShowParty(info)
+	else
+		ui:HideParty()
+	end
+end)
+
+Notify.OnClientEvent:Connect(function(message: string)
+	setBusy(false)
+	ui:Toast(message)
+end)
+]]></string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">MatchmakingUI</string>
+        <string name="Source"><![CDATA[--!strict
+-- Interfejs matchmakingu budowany w kodzie: okno "Create Party", pasek party i powiadomienia.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
+
+type Mode = Config.Mode
+
+export type Callbacks = {
+	OnModeClicked: (mode: Mode) -> (),
+	OnSizeChanged: (delta: number) -> (),
+	OnCreate: () -> (),
+	OnBack: () -> (),
+	OnLeave: () -> (),
+}
+
+export type CreateView = {
+	MapName: string,
+	MapImage: string,
+	SelectedModeId: string?,
+	Size: number,
+	MaxPlayers: number,
+	Wins: number,
+}
+
+export type PartyView = {
+	MapName: string,
+	ModeName: string,
+	Count: number,
+	Size: number,
+	TimeLeft: number,
+	Status: string,
+}
+
+local WHITE = Color3.new(1, 1, 1)
+local DARK = Color3.fromRGB(20, 20, 20)
+local GREEN = Color3.fromRGB(19, 196, 19)
+local RED = Color3.fromRGB(230, 20, 20)
+local LOCKED = Color3.fromRGB(70, 32, 32)
+local BUTTON_FONT = Enum.Font.GothamBlack
+local TITLE_FONT = Enum.Font.SpecialElite
+
+local function create(className: string, props: { [string]: any }, children: { any }?): any
+	local instance = Instance.new(className)
+	for key, value in props do
+		if key ~= "Parent" then
+			(instance :: any)[key] = value
+		end
+	end
+	if children then
+		for _, child in children do
+			child.Parent = instance
+		end
+	end
+	if props.Parent then
+		instance.Parent = props.Parent
+	end
+	return instance
+end
+
+local function corner(radius: number): UICorner
+	return create("UICorner", { CornerRadius = UDim.new(0, radius) })
+end
+
+local function text(props: { [string]: any }): TextLabel
+	props.BackgroundTransparency = 1
+	props.TextColor3 = props.TextColor3 or WHITE
+	props.TextScaled = true
+	return create("TextLabel", props, { create("UIStroke", { Thickness = 2, Transparency = 0.2 }) })
+end
+
+local function button(props: { [string]: any }): TextButton
+	props.TextColor3 = props.TextColor3 or WHITE
+	props.Font = props.Font or BUTTON_FONT
+	props.TextScaled = true
+	props.AutoButtonColor = true
+	return create("TextButton", props, {
+		corner(8),
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 6),
+			PaddingBottom = UDim.new(0, 6),
+			PaddingLeft = UDim.new(0, 10),
+			PaddingRight = UDim.new(0, 10),
+		}),
+	})
+end
+
+local MatchmakingUI = {}
+MatchmakingUI.__index = MatchmakingUI
+
+export type MatchmakingUI = typeof(setmetatable(
+	{} :: {
+		_callbacks: Callbacks,
+		_gui: ScreenGui,
+		_createRoot: Frame,
+		_createPop: UIScale,
+		_mapImage: ImageLabel,
+		_title: TextLabel,
+		_modeRow: Frame,
+		_sizeLabel: TextLabel,
+		_minus: TextButton,
+		_plus: TextButton,
+		_createButton: TextButton,
+		_party: Frame,
+		_partyTitle: TextLabel,
+		_partyStatus: TextLabel,
+		_toast: TextLabel,
+		_toastToken: number,
+	},
+	MatchmakingUI
+))
+
+function MatchmakingUI.new(parent: Instance, callbacks: Callbacks): MatchmakingUI
+	local gui = create("ScreenGui", {
+		Name = "MatchmakingGui",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = 10,
+	})
+
+	-- Okno "Create Party" ----------------------------------------------------
+	local viewportScale = create("UIScale", {})
+	local createRoot = create("Frame", {
+		Name = "CreateParty",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(360, 466),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = gui,
+	}, { viewportScale })
+	local createPop = create("UIScale", {})
+	local holder = create("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Parent = createRoot,
+	}, { createPop })
+
+	local panel = create("Frame", {
+		Name = "Panel",
+		Size = UDim2.fromOffset(360, 410),
+		BackgroundColor3 = Color3.fromRGB(38, 52, 30),
+		ClipsDescendants = true,
+		Parent = holder,
+	}, {
+		corner(16),
+		create("UIStroke", { Thickness = 2, Color = Color3.new(0, 0, 0) }),
+	})
+	local mapImage = create("ImageLabel", {
+		Name = "MapImage",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		ScaleType = Enum.ScaleType.Crop,
+		Parent = panel,
+	}, { corner(16) })
+	create("Frame", {
+		Name = "Shade",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		Parent = panel,
+	}, {
+		corner(16),
+		create("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.95),
+				NumberSequenceKeypoint.new(0.3, 0.6),
+				NumberSequenceKeypoint.new(0.5, 0.3),
+				NumberSequenceKeypoint.new(1, 0.25),
+			}),
+		}),
+	})
+
+	local title = text({
+		Name = "Title",
+		Text = Config.MapName,
+		Font = TITLE_FONT,
+		Position = UDim2.fromOffset(20, 112),
+		Size = UDim2.new(1, -40, 0, 44),
+		Parent = panel,
+	})
+	text({
+		Name = "Subtitle",
+		Text = "CREATE PARTY",
+		Font = TITLE_FONT,
+		Position = UDim2.fromOffset(20, 154),
+		Size = UDim2.new(1, -40, 0, 28),
+		Parent = panel,
+	})
+	create("Frame", {
+		Name = "Divider",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 192),
+		Size = UDim2.new(0.86, 0, 0, 2),
+		BackgroundColor3 = WHITE,
+		BorderSizePixel = 0,
+		Parent = panel,
+	})
+
+	local modeRow = create("Frame", {
+		Name = "Modes",
+		Position = UDim2.fromOffset(10, 204),
+		Size = UDim2.new(1, -20, 0, 40),
+		BackgroundTransparency = 1,
+		Parent = panel,
+	}, {
+		create("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 8),
+		}),
+	})
+
+	text({
+		Name = "PartySizeLabel",
+		Text = "Party Size:",
+		Font = TITLE_FONT,
+		Position = UDim2.fromOffset(20, 252),
+		Size = UDim2.new(1, -40, 0, 32),
+		Parent = panel,
+	})
+
+	local sizeRow = create("Frame", {
+		Name = "SizeRow",
+		Position = UDim2.fromOffset(0, 292),
+		Size = UDim2.new(1, 0, 0, 46),
+		BackgroundTransparency = 1,
+		Parent = panel,
+	}, {
+		create("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 36),
+		}),
+	})
+	local function sizeButton(label: string, order: number): TextButton
+		return button({
+			Text = label,
+			LayoutOrder = order,
+			Size = UDim2.fromOffset(46, 46),
+			BackgroundColor3 = Color3.fromRGB(45, 45, 45),
+			BackgroundTransparency = 0.25,
+			Parent = sizeRow,
+		})
+	end
+	local minus = sizeButton("-", 1)
+	local sizeLabel = create("TextLabel", {
+		Name = "Size",
+		LayoutOrder = 2,
+		Size = UDim2.fromOffset(46, 46),
+		BackgroundColor3 = Color3.fromRGB(45, 45, 45),
+		BackgroundTransparency = 0.25,
+		Font = BUTTON_FONT,
+		TextColor3 = WHITE,
+		TextScaled = true,
+		Text = "1",
+		Parent = sizeRow,
+	}, {
+		corner(8),
+		create("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6) }),
+	})
+	local plus = sizeButton("+", 3)
+
+	local createButton = button({
+		Name = "Create",
+		Text = "CREATE",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 352),
+		Size = UDim2.fromOffset(244, 42),
+		BackgroundColor3 = GREEN,
+		Parent = panel,
+	})
+
+	local back = button({
+		Name = "Back",
+		Text = "BACK",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.fromScale(0.5, 1),
+		Size = UDim2.fromOffset(146, 42),
+		BackgroundColor3 = RED,
+		Parent = holder,
+	})
+
+	-- Pasek party (na dole ekranu) -------------------------------------------
+	local party = create("Frame", {
+		Name = "Party",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -24),
+		Size = UDim2.fromOffset(380, 84),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 0.25,
+		Visible = false,
+		Parent = gui,
+	}, {
+		corner(14),
+		create("UIStroke", { Thickness = 2, Color = Color3.new(0, 0, 0) }),
+		viewportScale:Clone(),
+	})
+	local partyTitle = text({
+		Name = "Title",
+		Font = TITLE_FONT,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(16, 10),
+		Size = UDim2.new(1, -150, 0, 32),
+		Parent = party,
+	})
+	local partyStatus = text({
+		Name = "Status",
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(16, 46),
+		Size = UDim2.new(1, -150, 0, 24),
+		Parent = party,
+	})
+	local leave = button({
+		Name = "Leave",
+		Text = "LEAVE",
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(116, 44),
+		BackgroundColor3 = RED,
+		Parent = party,
+	})
+
+	-- Powiadomienia ----------------------------------------------------------
+	local toast = create("TextLabel", {
+		Name = "Toast",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 72),
+		Size = UDim2.fromOffset(460, 40),
+		BackgroundColor3 = DARK,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextColor3 = WHITE,
+		TextTransparency = 1,
+		TextScaled = true,
+		Visible = false,
+		Parent = gui,
+	}, {
+		corner(10),
+		create("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
+		viewportScale:Clone(),
+	})
+
+	local function rescale()
+		local camera = Workspace.CurrentCamera
+		local height = if camera then camera.ViewportSize.Y else 800
+		local value = math.clamp(height / 820, 0.55, 1.25)
+		for _, descendant in gui:GetDescendants() do
+			if descendant:IsA("UIScale") and descendant ~= createPop then
+				descendant.Scale = value
+			end
+		end
+	end
+	rescale()
+	local function watchCamera()
+		local camera = Workspace.CurrentCamera
+		if camera then
+			camera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
+		end
+		rescale()
+	end
+	watchCamera()
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchCamera)
+
+	minus.Activated:Connect(function()
+		callbacks.OnSizeChanged(-1)
+	end)
+	plus.Activated:Connect(function()
+		callbacks.OnSizeChanged(1)
+	end)
+	createButton.Activated:Connect(callbacks.OnCreate)
+	back.Activated:Connect(callbacks.OnBack)
+	leave.Activated:Connect(callbacks.OnLeave)
+
+	gui.Parent = parent
+
+	return setmetatable({
+		_callbacks = callbacks,
+		_gui = gui,
+		_createRoot = createRoot,
+		_createPop = createPop,
+		_mapImage = mapImage,
+		_title = title,
+		_modeRow = modeRow,
+		_sizeLabel = sizeLabel,
+		_minus = minus,
+		_plus = plus,
+		_createButton = createButton,
+		_party = party,
+		_partyTitle = partyTitle,
+		_partyStatus = partyStatus,
+		_toast = toast,
+		_toastToken = 0,
+	}, MatchmakingUI)
+end
+
+function MatchmakingUI.IsCreateOpen(self: MatchmakingUI): boolean
+	return self._createRoot.Visible
+end
+
+function MatchmakingUI.OpenCreate(self: MatchmakingUI, view: CreateView)
+	self:RenderCreate(view)
+	self._createRoot.Visible = true
+	self._createPop.Scale = 0.85
+	TweenService:Create(self._createPop, TweenInfo.new(0.25, Enum.EasingStyle.Back), { Scale = 1 }):Play()
+end
+
+function MatchmakingUI.RenderCreate(self: MatchmakingUI, view: CreateView)
+	self._title.Text = view.MapName
+	self._mapImage.Image = view.MapImage
+	self._sizeLabel.Text = tostring(view.Size)
+	self._minus.BackgroundTransparency = if view.Size <= 1 then 0.6 else 0.25
+	self._plus.BackgroundTransparency = if view.Size >= view.MaxPlayers then 0.6 else 0.25
+
+	for _, child in self._modeRow:GetChildren() do
+		if child:IsA("GuiButton") then
+			child:Destroy()
+		end
+	end
+	for index, mode in Config.Modes do
+		local unlocked = view.Wins >= mode.RequiredWins
+		local selected = mode.Id == view.SelectedModeId
+		local modeButton = button({
+			Name = mode.Id,
+			LayoutOrder = index,
+			Text = if unlocked then mode.DisplayName else `🔒{Config.FormatRequirement(mode)}`,
+			Size = UDim2.fromOffset(150, 40),
+			BackgroundColor3 = if not unlocked then LOCKED elseif selected then mode.Color else DARK,
+			BackgroundTransparency = if selected then 0 else 0.3,
+			Parent = self._modeRow,
+		})
+		if selected then
+			create("UIStroke", {
+				Thickness = 2,
+				Color = WHITE,
+				ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+				Parent = modeButton,
+			})
+		end
+		modeButton.Activated:Connect(function()
+			self._callbacks.OnModeClicked(mode)
+		end)
+	end
+end
+
+function MatchmakingUI.SetCreateBusy(self: MatchmakingUI, busy: boolean)
+	self._createButton.Active = not busy
+	self._createButton.AutoButtonColor = not busy
+	self._createButton.BackgroundTransparency = if busy then 0.5 else 0
+end
+
+function MatchmakingUI.CloseCreate(self: MatchmakingUI)
+	self._createRoot.Visible = false
+	self:SetCreateBusy(false)
+end
+
+function MatchmakingUI.ShowParty(self: MatchmakingUI, view: PartyView)
+	self._party.Visible = true
+	self._partyTitle.Text = `{view.MapName} • {view.ModeName}`
+	local players = `{view.Count}/{view.Size} players`
+	if view.Status == "Teleporting" then
+		self._partyStatus.Text = `{players} • Teleporting...`
+	else
+		self._partyStatus.Text = `{players} • Starting in {view.TimeLeft}s`
+	end
+end
+
+function MatchmakingUI.HideParty(self: MatchmakingUI)
+	self._party.Visible = false
+end
+
+function MatchmakingUI.Toast(self: MatchmakingUI, message: string)
+	self._toastToken += 1
+	local token = self._toastToken
+	local toast = self._toast
+	toast.Text = message
+	toast.Visible = true
+	toast.TextTransparency = 0
+	toast.BackgroundTransparency = 0.3
+	task.delay(2.5, function()
+		if self._toastToken ~= token then
+			return
+		end
+		local fade = TweenInfo.new(0.4)
+		TweenService:Create(toast, fade, { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+	end)
+end
+
+return MatchmakingUI
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

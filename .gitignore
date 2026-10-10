@@ -23,3 +23,5 @@ bin-release/
 *.rbxm
 *.rbxmx
 sourcemap.json
+!install/*.rbxmx
+install/*.zip

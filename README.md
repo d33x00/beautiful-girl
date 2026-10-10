@@ -7,6 +7,17 @@ System party w stylu "FARMHOUSE / CREATE PARTY":
 3. Inni gracze wchodzą na pad, żeby **dołączyć** (serwer sprawdza miejsce i wymagane wygrane). Zejście z padu albo **LEAVE** = wyjście z party.
 4. Po odliczaniu (20 s, albo 5 s gdy party jest pełne) cała party leci na **prywatny serwer w miejscu gry** (inny świat). Tryb, mapa i gracze trafiają tam przez MemoryStore (zaufane) + TeleportData (zapas).
 
+## Szybka instalacja w Studio (bez Rojo)
+
+W folderze `install/` są gotowe pliki `.rbxmx`. W Studio kliknij prawym na wskazany serwis → **Insert from File...** i wybierz plik:
+
+| Plik | Prawy klik na |
+|---|---|
+| `LOBBY_ReplicatedStorage_MatchmakingConfig.rbxmx` | ReplicatedStorage (lobby) |
+| `LOBBY_ServerScriptService_*.rbxmx` (3 pliki) | ServerScriptService (lobby) |
+| `LOBBY_StarterPlayerScripts_MatchmakingClient.rbxmx` | StarterPlayer → StarterPlayerScripts (lobby) |
+| `GAME_ServerScriptService_*.rbxmx` (2 pliki) | ServerScriptService (miejsce gry) |
+
 ## Pliki
 
 | Plik | Gdzie w Studio | Typ |

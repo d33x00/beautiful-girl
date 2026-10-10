@@ -1,0 +1,425 @@
+<roblox version="4">
+  <Item class="Script" referent="0">
+    <Properties>
+      <string name="Name">Leaderboards</string>
+      <token name="RunContext">0</token>
+      <string name="Source"><![CDATA[--!strict
+-- Topki na modelach "Leaderboard" / "Leadboard" w Workspace, w stylu farmy (drewno + czerwona stodoła).
+-- Atrybuty na modelu (opcjonalne):
+--   Stat  = "Wins"        statystyka z PlayerStats.StatNames
+--   Rows  = 10            liczba miejsc
+--   Title = "TOP WINS"    tytuł
+--   Face  = "Front"       strona części z ekranem (domyślnie obie duże strony)
+-- Ekranem jest część o nazwie Board/Screen/Display/Sign/Surface albo z atrybutem
+-- LeaderboardSurface = true; bez tego największa część modelu.
+
+local Players = game:GetService("Players")
+local ServerScriptService = game:GetService("ServerScriptService")
+local UserService = game:GetService("UserService")
+local Workspace = game:GetService("Workspace")
+
+local PlayerStats = require(ServerScriptService:WaitForChild("PlayerStats"))
+
+local REFRESH_INTERVAL = 60
+local DEFAULT_ROWS = 10
+local MODEL_PATTERN = "^leade?r?board"
+local SURFACE_NAMES = { board = true, screen = true, display = true, sign = true, surface = true }
+
+-- Paleta mapy FARMHOUSE.
+local WOOD_DARK = Color3.fromRGB(58, 36, 20)
+local WOOD = Color3.fromRGB(122, 80, 48)
+local WOOD_LIGHT = Color3.fromRGB(140, 94, 58)
+local BARN_RED = Color3.fromRGB(184, 58, 52)
+local TRIM = Color3.fromRGB(246, 238, 222)
+local PUMPKIN = Color3.fromRGB(255, 166, 48)
+local WHITE = Color3.new(1, 1, 1)
+local RANK_COLORS = {
+	Color3.fromRGB(255, 200, 30), -- złoto
+	Color3.fromRGB(206, 210, 220), -- srebro
+	Color3.fromRGB(205, 127, 50), -- brąz
+}
+local TITLE_FONT = Enum.Font.SpecialElite
+
+type Row = { Root: Frame, Rank: TextLabel, Avatar: ImageLabel, Name: TextLabel, Value: TextLabel }
+type Screen = { Rows: { Row }, Footer: TextLabel }
+type Board = { Model: Model, Stat: string, RowCount: number, Screens: { Screen } }
+type Entry = { UserId: number, Value: number }
+
+local boards: { Board } = {}
+local nameCache: { [number]: string } = {}
+
+local function create(className: string, props: { [string]: any }, children: { any }?): any
+	local instance = Instance.new(className)
+	for name, value in props do
+		if name ~= "Parent" then
+			(instance :: any)[name] = value
+		end
+	end
+	if children then
+		for _, child in children do
+			child.Parent = instance
+		end
+	end
+	if props.Parent then
+		instance.Parent = props.Parent
+	end
+	return instance
+end
+
+local function corner(scale: number): UICorner
+	return create("UICorner", { CornerRadius = UDim.new(scale, 0) })
+end
+
+local function label(props: { [string]: any }): TextLabel
+	props.BackgroundTransparency = props.BackgroundTransparency or 1
+	props.TextScaled = true
+	props.TextColor3 = props.TextColor3 or WHITE
+	return create("TextLabel", props, { create("UIStroke", { Thickness = 3, Transparency = 0.15 }) })
+end
+
+local function abbreviate(value: number): string
+	if value >= 1e6 then
+		return string.format("%.1fM", value / 1e6)
+	elseif value >= 1e4 then
+		return string.format("%.1fK", value / 1e3)
+	end
+	return tostring(value)
+end
+
+-- Budowanie planszy ----------------------------------------------------------
+
+local function buildRow(parent: Instance, index: number, rowCount: number): Row
+	local root = create("Frame", {
+		Name = `Row{index}`,
+		LayoutOrder = index,
+		Size = UDim2.new(1, 0, 1 / rowCount, -6),
+		BackgroundColor3 = if index % 2 == 1 then WOOD_LIGHT else WOOD,
+		Parent = parent,
+	}, {
+		create("UICorner", { CornerRadius = UDim.new(0.2, 0) }),
+		create("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0.015, 0),
+		}),
+		create("UIPadding", { PaddingLeft = UDim.new(0.015, 0), PaddingRight = UDim.new(0.03, 0) }),
+	})
+	local rank = label({
+		Name = "Rank",
+		LayoutOrder = 1,
+		Text = tostring(index),
+		Font = Enum.Font.FredokaOne,
+		Size = UDim2.fromScale(0.82, 0.82),
+		SizeConstraint = Enum.SizeConstraint.RelativeYY,
+		BackgroundTransparency = 0,
+		BackgroundColor3 = RANK_COLORS[index] or WOOD_DARK,
+		Parent = root,
+	})
+	corner(1).Parent = rank
+	create("UIPadding", { PaddingTop = UDim.new(0.15, 0), PaddingBottom = UDim.new(0.15, 0) }).Parent = rank
+	local avatar = create("ImageLabel", {
+		Name = "Avatar",
+		LayoutOrder = 2,
+		Size = UDim2.fromScale(0.82, 0.82),
+		SizeConstraint = Enum.SizeConstraint.RelativeYY,
+		BackgroundColor3 = WOOD_DARK,
+		Parent = root,
+	}, { corner(0.25) })
+	local name = label({
+		Name = "PlayerName",
+		LayoutOrder = 3,
+		Font = TITLE_FONT,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.fromScale(0.5, 0.62),
+		Parent = root,
+	})
+	create("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = name
+	local value = label({
+		Name = "Value",
+		LayoutOrder = 4,
+		Font = Enum.Font.FredokaOne,
+		TextColor3 = PUMPKIN,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Size = UDim2.fromScale(0.2, 0.62),
+		Parent = root,
+	})
+	return { Root = root, Rank = rank, Avatar = avatar, Name = name, Value = value }
+end
+
+local function buildScreen(part: BasePart, face: Enum.NormalId, title: string, rowCount: number): Screen
+	local gui = create("SurfaceGui", {
+		Name = `LeaderboardGui_{face.Name}`,
+		Face = face,
+		Adornee = part,
+		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
+		PixelsPerStud = 50,
+		LightInfluence = 0,
+		MaxDistance = 200,
+		ClipsDescendants = true,
+		Parent = part,
+	})
+	local frame = create("Frame", {
+		Name = "Frame",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = WOOD_DARK,
+		Parent = gui,
+	}, {
+		create("UIPadding", {
+			PaddingTop = UDim.new(0.025, 0),
+			PaddingBottom = UDim.new(0.02, 0),
+			PaddingLeft = UDim.new(0.03, 0),
+			PaddingRight = UDim.new(0.03, 0),
+		}),
+	})
+
+	-- Nagłówek: czerwona deska stodoły z białym obramowaniem.
+	local header = create("Frame", {
+		Name = "Header",
+		Size = UDim2.fromScale(1, 0.15),
+		BackgroundColor3 = BARN_RED,
+		Parent = frame,
+	}, {
+		create("UICorner", { CornerRadius = UDim.new(0.18, 0) }),
+		create("UIStroke", { Thickness = 6, Color = TRIM, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
+	})
+	label({
+		Name = "Title",
+		Text = `🏆 {title} 🏆`,
+		Font = TITLE_FONT,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromScale(0.94, 0.78),
+		Parent = header,
+	})
+
+	local list = create("Frame", {
+		Name = "Rows",
+		Position = UDim2.fromScale(0, 0.19),
+		Size = UDim2.fromScale(1, 0.73),
+		BackgroundTransparency = 1,
+		Parent = frame,
+	}, {
+		create("UIListLayout", {
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 6),
+		}),
+	})
+	local rows = {}
+	for index = 1, rowCount do
+		table.insert(rows, buildRow(list, index, rowCount))
+	end
+
+	local footer = label({
+		Name = "Footer",
+		Text = "Loading...",
+		Font = TITLE_FONT,
+		TextColor3 = TRIM,
+		Position = UDim2.fromScale(0, 0.935),
+		Size = UDim2.fromScale(1, 0.065),
+		Parent = frame,
+	})
+	return { Rows = rows, Footer = footer }
+end
+
+local function findSurfacePart(model: Model): BasePart?
+	local largest: BasePart? = nil
+	local largestArea = 0
+	for _, descendant in model:GetDescendants() do
+		if not descendant:IsA("BasePart") then
+			continue
+		end
+		if descendant:GetAttribute("LeaderboardSurface") == true or SURFACE_NAMES[string.lower(descendant.Name)] then
+			return descendant
+		end
+		local size = descendant.Size
+		local dims = { size.X, size.Y, size.Z }
+		table.sort(dims)
+		local area = dims[2] * dims[3]
+		if area > largestArea then
+			largest, largestArea = descendant, area
+		end
+	end
+	return largest
+end
+
+-- Ekran na dwóch dużych ścianach części (oś najcieńsza), chyba że atrybut Face mówi inaczej.
+local function screenFaces(model: Model, part: BasePart): { Enum.NormalId }
+	local faceName = model:GetAttribute("Face")
+	if typeof(faceName) == "string" then
+		for _, face in Enum.NormalId:GetEnumItems() do
+			if face.Name == faceName then
+				return { face }
+			end
+		end
+	end
+	local size = part.Size
+	if size.X <= size.Y and size.X <= size.Z then
+		return { Enum.NormalId.Right, Enum.NormalId.Left }
+	elseif size.Y <= size.Z then
+		return { Enum.NormalId.Top, Enum.NormalId.Bottom }
+	end
+	return { Enum.NormalId.Front, Enum.NormalId.Back }
+end
+
+local function register(instance: Instance)
+	if not instance:IsA("Model") or not string.find(string.lower(instance.Name), MODEL_PATTERN) then
+		return
+	end
+	for _, board in boards do
+		if board.Model == instance or instance:IsDescendantOf(board.Model) then
+			return
+		end
+	end
+
+	local part = findSurfacePart(instance)
+	if not part then
+		warn(`[Leaderboard] {instance:GetFullName()} has no BasePart, skipping.`)
+		return
+	end
+	local statAttribute = instance:GetAttribute("Stat")
+	local stat = if typeof(statAttribute) == "string" then statAttribute else "Wins"
+	if not PlayerStats.GetOrderedStore(stat) then
+		warn(`[Leaderboard] Unknown stat "{stat}" on {instance:GetFullName()}, add it to PlayerStats.StatNames.`)
+		return
+	end
+	local rowsAttribute = instance:GetAttribute("Rows")
+	local rowCount = math.clamp(if typeof(rowsAttribute) == "number" then math.floor(rowsAttribute) else DEFAULT_ROWS, 3, 25)
+	local titleAttribute = instance:GetAttribute("Title")
+	local title = if typeof(titleAttribute) == "string" then titleAttribute else `TOP {string.upper(stat)}`
+
+	for _, descendant in instance:GetDescendants() do
+		if descendant:IsA("BaseScript") or descendant:IsA("SurfaceGui") then
+			warn(`[Leaderboard] {descendant:GetFullName()} may conflict with the new leaderboard, consider removing it.`)
+		end
+	end
+
+	local screens = {}
+	for _, face in screenFaces(instance, part) do
+		table.insert(screens, buildScreen(part, face, title, rowCount))
+	end
+	table.insert(boards, { Model = instance, Stat = stat, RowCount = rowCount, Screens = screens })
+	print(`[Leaderboard] Registered {instance:GetFullName()} (stat: {stat}, surface: {part.Name}).`)
+end
+
+-- Dane -----------------------------------------------------------------------
+
+local function resolveNames(entries: { Entry })
+	local missing = {}
+	for _, entry in entries do
+		if not nameCache[entry.UserId] then
+			local player = Players:GetPlayerByUserId(entry.UserId)
+			if player then
+				nameCache[entry.UserId] = player.DisplayName
+			else
+				table.insert(missing, entry.UserId)
+			end
+		end
+	end
+	if #missing == 0 then
+		return
+	end
+	local ok, infos = pcall(function()
+		return UserService:GetUserInfosByUserIdsAsync(missing)
+	end)
+	if ok then
+		for _, info in infos do
+			nameCache[info.Id] = info.DisplayName
+		end
+	end
+	for _, userId in missing do
+		if not nameCache[userId] then
+			local found, name = pcall(function()
+				return Players:GetNameFromUserIdAsync(userId)
+			end)
+			nameCache[userId] = if found then name else `Player {userId}`
+		end
+	end
+end
+
+local function fetch(stat: string, count: number): { Entry }?
+	local orderedStore = PlayerStats.GetOrderedStore(stat)
+	if not orderedStore then
+		return nil
+	end
+	local ok, pages = pcall(function()
+		return orderedStore:GetSortedAsync(false, count, 1)
+	end)
+	if not ok then
+		warn(`[Leaderboard] Could not load {stat}:`, pages)
+		return nil
+	end
+	local entries = {}
+	for _, item in pages:GetCurrentPage() do
+		local userId = tonumber(item.key)
+		if userId then
+			table.insert(entries, { UserId = userId, Value = item.value })
+		end
+	end
+	resolveNames(entries)
+	return entries
+end
+
+local function render(board: Board, entries: { Entry })
+	for _, screen in board.Screens do
+		for index, row in screen.Rows do
+			local entry = entries[index]
+			row.Root.BackgroundTransparency = if entry then 0 else 0.45
+			if entry then
+				row.Name.Text = nameCache[entry.UserId] or "..."
+				row.Value.Text = abbreviate(entry.Value)
+				row.Avatar.Image = `rbxthumb://type=AvatarHeadShot&id={entry.UserId}&w=150&h=150`
+			else
+				row.Name.Text = if index == 1 then "Be the first!" else "---"
+				row.Value.Text = ""
+				row.Avatar.Image = ""
+			end
+		end
+	end
+end
+
+local function setFooter(text: string)
+	for _, board in boards do
+		for _, screen in board.Screens do
+			screen.Footer.Text = text
+		end
+	end
+end
+
+local function refresh()
+	local needed: { [string]: number } = {}
+	for _, board in boards do
+		needed[board.Stat] = math.max(needed[board.Stat] or 0, board.RowCount)
+	end
+	for stat, count in needed do
+		local entries = fetch(stat, count)
+		if entries then
+			for _, board in boards do
+				if board.Stat == stat then
+					render(board, entries)
+				end
+			end
+		end
+	end
+end
+
+for _, instance in Workspace:GetDescendants() do
+	register(instance)
+end
+Workspace.DescendantAdded:Connect(register)
+
+if #boards == 0 then
+	warn("[Leaderboard] No Leaderboard models found in Workspace.")
+end
+
+while true do
+	refresh()
+	for secondsLeft = REFRESH_INTERVAL, 1, -1 do
+		setFooter(`Updates in {secondsLeft}s`)
+		task.wait(1)
+	end
+end
+]]></string>
+    </Properties>
+  </Item>
+</roblox>
