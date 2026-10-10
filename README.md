@@ -17,6 +17,8 @@ System party w stylu "FARMHOUSE / CREATE PARTY":
 | `src/lobby/ServerScriptService/Matchmaking/Teleporter.lua` | `ServerScriptService/Matchmaking/Teleporter` (dziecko skryptu) | ModuleScript |
 | `src/lobby/StarterPlayer/StarterPlayerScripts/MatchmakingClient/init.client.lua` | `StarterPlayer/StarterPlayerScripts/MatchmakingClient` | LocalScript |
 | `src/lobby/StarterPlayer/StarterPlayerScripts/MatchmakingClient/MatchmakingUI.lua` | `.../MatchmakingClient/MatchmakingUI` (dziecko) | ModuleScript |
+| `src/lobby/ServerScriptService/Leaderboards.server.lua` | `ServerScriptService/Leaderboards` | Script |
+| `src/shared/PlayerStats.lua` | `ServerScriptService/PlayerStats` — **w lobby i w miejscu gry** | ModuleScript |
 | `src/game/ServerScriptService/MatchLoader.server.lua` | **miejsce gry**: `ServerScriptService/MatchLoader` | Script |
 
 Z Rojo: `rojo serve default.project.json` (lobby) i `rojo serve game.project.json` (miejsce gry).
@@ -52,3 +54,29 @@ Powrót do lobby z dowolnego skryptu serwera:
 game.ServerStorage.ReturnToLobby:Fire()            -- wszyscy
 game.ServerStorage.ReturnToLobby:Fire({ player })  -- wybrani
 ```
+
+## Topka (Leaderboard)
+
+Modele w Workspace o nazwie zaczynającej się od `Leaderboard` lub `Leadboard` dostają planszę w stylu farmy: czerwony nagłówek stodoły z białym obramowaniem, drewniane deski, złoto/srebro/brąz dla top 3, avatar, nick i wynik. Odświeża się co 60 s (licznik na dole planszy).
+
+- **Ekran**: część o nazwie `Board`/`Screen`/`Display`/`Sign`/`Surface` albo z atrybutem `LeaderboardSurface = true`; bez tego największa część modelu. Napis pojawia się na obu dużych ścianach — jeśli jest odwrócony albo na złej ścianie, ustaw na modelu atrybut `Face` (`Front`, `Back`, `Left`, `Right`).
+- **Atrybuty modelu (opcjonalne)**: `Stat` (domyślnie `Wins`), `Rows` (domyślnie 10), `Title` (domyślnie `TOP WINS`).
+- Jeśli model pochodzi z Toolboxa i ma własne skrypty/SurfaceGui, usuń je — w Output pojawi się ostrzeżenie, co koliduje.
+
+Dane: `PlayerStats` trzyma wygrane w DataStore (`leaderstats.Wins`, z tego korzysta też blokada trybów) i zapisuje je do OrderedDataStore, z którego czyta topka. Każda zmiana to atomowy `UpdateAsync`, więc lobby i serwery gry nie nadpisują sobie wyników.
+
+Wygraną przyznajesz w miejscu gry, gdy gracz wygra mecz:
+
+```lua
+game.ServerStorage.AwardWin:Fire(player)
+```
+
+Liczy się tylko w zweryfikowanym meczu (`MatchVerified`) i maks. raz na gracza na mecz.
+
+Test w Studio: włącz **Game Settings → Security → Enable Studio Access to API Services**, uruchom Play i w Command Bar (widok serwera):
+
+```lua
+require(game.ServerScriptService.PlayerStats).Increment(game.Players:GetPlayers()[1], "Wins", 5)
+```
+
+Plansza pokaże wynik przy następnym odświeżeniu (do 60 s).

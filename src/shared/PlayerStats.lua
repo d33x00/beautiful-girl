@@ -1,0 +1,118 @@
+--!strict
+-- Trwałe statystyki gracza (np. Wins) w DataStore + leaderstats + OrderedDataStore pod topkę.
+-- Ten sam moduł jest w lobby i w miejscu gry (ServerScriptService/PlayerStats).
+-- Każda zmiana to atomowy UpdateAsync, więc dwa serwery naraz nie nadpiszą sobie wyników.
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+
+local PlayerStats = {}
+
+-- Statystyki widoczne w leaderstats i dostępne dla topek.
+PlayerStats.StatNames = { "Wins" }
+
+local store = DataStoreService:GetDataStore("PlayerStats_v1")
+local ordered: { [string]: OrderedDataStore } = {}
+for _, stat in PlayerStats.StatNames do
+	ordered[stat] = DataStoreService:GetOrderedDataStore(`Leaderboard_{stat}_v1`)
+end
+
+local function key(userId: number): string
+	return `Player_{userId}`
+end
+
+local function leaderstat(player: Player, stat: string): IntValue?
+	local leaderstats = player:FindFirstChild("leaderstats")
+	local value = leaderstats and leaderstats:FindFirstChild(stat)
+	return if value and value:IsA("IntValue") then value else nil
+end
+
+local function syncOrdered(userId: number, stat: string, value: number)
+	if value <= 0 then
+		return
+	end
+	local ok, err = pcall(function()
+		ordered[stat]:SetAsync(tostring(userId), value)
+	end)
+	if not ok then
+		warn(`[PlayerStats] Could not update leaderboard {stat}:`, err)
+	end
+end
+
+function PlayerStats.GetOrderedStore(stat: string): OrderedDataStore?
+	return ordered[stat]
+end
+
+function PlayerStats.Get(player: Player, stat: string): number
+	local value = leaderstat(player, stat)
+	return if value then value.Value else 0
+end
+
+-- Dodaje `amount` (domyślnie 1) do statystyki i zapisuje od razu. Zwraca true przy sukcesie.
+function PlayerStats.Increment(player: Player, stat: string, amount: number?): boolean
+	assert(ordered[stat], `Unknown stat "{stat}", add it to PlayerStats.StatNames`)
+	local delta = amount or 1
+	local ok, result = pcall(function()
+		return store:UpdateAsync(key(player.UserId), function(data: any)
+			local profile = if typeof(data) == "table" then data else {}
+			profile[stat] = (tonumber(profile[stat]) or 0) + delta
+			return profile
+		end)
+	end)
+	if not ok or typeof(result) ~= "table" then
+		warn(`[PlayerStats] Could not save {stat} for {player.Name}:`, result)
+		return false
+	end
+
+	local newValue = tonumber(result[stat]) or 0
+	local value = leaderstat(player, stat)
+	if value then
+		value.Value = newValue
+	end
+	task.spawn(syncOrdered, player.UserId, stat, newValue)
+	return true
+end
+
+local function onPlayerAdded(player: Player)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	for _, stat in PlayerStats.StatNames do
+		local value = Instance.new("IntValue")
+		value.Name = stat
+		value.Parent = leaderstats
+	end
+	leaderstats.Parent = player
+
+	local ok, data = false, nil
+	for attempt = 1, 3 do
+		ok, data = pcall(function()
+			return store:GetAsync(key(player.UserId))
+		end)
+		if ok then
+			break
+		end
+		warn(`[PlayerStats] Load attempt {attempt} for {player.Name} failed:`, data)
+		task.wait(attempt * 2)
+	end
+	if not ok or player.Parent ~= Players then
+		return
+	end
+
+	for _, stat in PlayerStats.StatNames do
+		local loaded = if typeof(data) == "table" then tonumber(data[stat]) or 0 else 0
+		local value = leaderstat(player, stat)
+		if value then
+			-- max: Increment mógł skończyć się przed wczytaniem.
+			value.Value = math.max(value.Value, loaded)
+		end
+		task.spawn(syncOrdered, player.UserId, stat, loaded)
+	end
+	player:SetAttribute("StatsLoaded", true)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, player in Players:GetPlayers() do
+	task.spawn(onPlayerAdded, player)
+end
+
+return PlayerStats

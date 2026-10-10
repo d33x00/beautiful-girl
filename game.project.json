@@ -5,6 +5,9 @@
     "ServerScriptService": {
       "MatchLoader": {
         "$path": "src/game/ServerScriptService/MatchLoader.server.lua"
+      },
+      "PlayerStats": {
+        "$path": "src/shared/PlayerStats.lua"
       }
     }
   }

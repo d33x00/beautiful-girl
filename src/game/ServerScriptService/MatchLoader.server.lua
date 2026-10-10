@@ -7,12 +7,16 @@
 --   Workspace:GetAttribute("MatchVerified")  -> true, gdy dane pochodzą z MemoryStore (zaufane)
 --   Workspace:GetAttribute("MatchReady")     -> true, gdy dane zostały wczytane
 -- Powrót do lobby: ServerStorage.ReturnToLobby:Fire({ gracze }) lub :Fire() dla wszystkich.
+-- Wygrana (trafia do topki i odblokowuje tryby): ServerStorage.AwardWin:Fire(player)
 
 local MemoryStoreService = game:GetService("MemoryStoreService")
 local Players = game:GetService("Players")
+local ServerScriptService = game:GetService("ServerScriptService")
 local ServerStorage = game:GetService("ServerStorage")
 local TeleportService = game:GetService("TeleportService")
 local Workspace = game:GetService("Workspace")
+
+local PlayerStats = require(ServerScriptService:WaitForChild("PlayerStats"))
 
 -- Musi być takie samo jak w Teleporter.lua w lobby.
 local MATCHES_MAP = "MatchmakingMatches"
@@ -86,5 +90,27 @@ returnToLobby.Event:Connect(function(players: { Player }?)
 	end)
 	if not ok then
 		warn("[Match] Return to lobby failed:", err)
+	end
+end)
+
+-- Wygrana liczy się tylko w zweryfikowanym meczu (dane z MemoryStore), żeby nie dało się
+-- nabić topki podrobionym TeleportData.
+local awardWin = Instance.new("BindableEvent")
+awardWin.Name = "AwardWin"
+awardWin.Parent = ServerStorage
+
+local awarded: { [number]: boolean } = {}
+
+awardWin.Event:Connect(function(player: Player)
+	if Workspace:GetAttribute("MatchVerified") ~= true then
+		warn(`[Match] Win for {player.Name} not awarded: match is not verified.`)
+		return
+	end
+	if awarded[player.UserId] then
+		return -- jedna wygrana na gracza na mecz
+	end
+	awarded[player.UserId] = true
+	if not PlayerStats.Increment(player, "Wins", 1) then
+		awarded[player.UserId] = nil
 	end
 end)

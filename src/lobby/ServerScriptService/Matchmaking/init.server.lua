@@ -6,8 +6,11 @@
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
 
+-- Tworzy leaderstats.Wins z DataStore (z nich Config.GetWins czyta odblokowane tryby).
+require(ServerScriptService:WaitForChild("PlayerStats"))
 local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
 local Pad = require(script.Pad)
 local Teleporter = require(script.Teleporter)
