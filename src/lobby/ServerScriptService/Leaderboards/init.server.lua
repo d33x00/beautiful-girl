@@ -1,5 +1,7 @@
 --!strict
--- Topki na modelach "Leaderboard" / "Leadboard" w Workspace, w stylu farmy (drewno + czerwona stodoła).
+-- Topki w miejscu modeli "Leaderboard" / "Leadboard" w Workspace.
+-- Biały model to znacznik miejsca: po starcie gry powstaje w nim drewniana tablica
+-- (BoardBuilder), a znacznik jest usuwany. Ustaw REPLACE_MARKERS = false, jeśli model ma zostać.
 -- Atrybuty na modelu (opcjonalne):
 --   Stat  = "Wins"        statystyka z PlayerStats.StatNames
 --   Rows  = 10            liczba miejsc
@@ -14,8 +16,10 @@ local UserService = game:GetService("UserService")
 local Workspace = game:GetService("Workspace")
 
 local PlayerStats = require(ServerScriptService:WaitForChild("PlayerStats"))
+local BoardBuilder = require(script.BoardBuilder)
 
 local REFRESH_INTERVAL = 60
+local REPLACE_MARKERS = true
 local DEFAULT_ROWS = 10
 local MODEL_PATTERN = "^leade?r?board"
 local SURFACE_NAMES = { board = true, screen = true, display = true, sign = true, surface = true }
@@ -267,34 +271,38 @@ local function register(instance: Instance)
 		end
 	end
 
-	local part = findSurfacePart(instance)
-	if not part then
-		warn(`[Leaderboard] {instance:GetFullName()} has no BasePart, skipping.`)
+	if not instance:FindFirstChildWhichIsA("BasePart", true) then
+		warn(`[Leaderboard] {instance:GetFullName()} has no parts, cannot tell where the board goes.`)
 		return
 	end
-	local statAttribute = instance:GetAttribute("Stat")
+	local parent = instance.Parent
+	local model = instance
+	if REPLACE_MARKERS and not BoardBuilder.IsBuilt(instance) then
+		model = BoardBuilder.Build(instance)
+	end
+	local part = findSurfacePart(model)
+	if not part then
+		return
+	end
+	local statAttribute = model:GetAttribute("Stat")
 	local stat = if typeof(statAttribute) == "string" then statAttribute else "Wins"
 	if not PlayerStats.GetOrderedStore(stat) then
-		warn(`[Leaderboard] Unknown stat "{stat}" on {instance:GetFullName()}, add it to PlayerStats.StatNames.`)
+		warn(`[Leaderboard] Unknown stat "{stat}" on {model.Name}, add it to PlayerStats.StatNames.`)
+		model.Parent = parent
 		return
 	end
-	local rowsAttribute = instance:GetAttribute("Rows")
+	local rowsAttribute = model:GetAttribute("Rows")
 	local rowCount = math.clamp(if typeof(rowsAttribute) == "number" then math.floor(rowsAttribute) else DEFAULT_ROWS, 3, 25)
-	local titleAttribute = instance:GetAttribute("Title")
+	local titleAttribute = model:GetAttribute("Title")
 	local title = if typeof(titleAttribute) == "string" then titleAttribute else `TOP {string.upper(stat)}`
 
-	for _, descendant in instance:GetDescendants() do
-		if descendant:IsA("BaseScript") or descendant:IsA("SurfaceGui") then
-			warn(`[Leaderboard] {descendant:GetFullName()} may conflict with the new leaderboard, consider removing it.`)
-		end
-	end
-
 	local screens = {}
-	for _, face in screenFaces(instance, part) do
+	for _, face in screenFaces(model, part) do
 		table.insert(screens, buildScreen(part, face, title, rowCount))
 	end
-	table.insert(boards, { Model = instance, Stat = stat, RowCount = rowCount, Screens = screens })
-	print(`[Leaderboard] Registered {instance:GetFullName()} (stat: {stat}, surface: {part.Name}).`)
+	table.insert(boards, { Model = model, Stat = stat, RowCount = rowCount, Screens = screens })
+	model.Parent = parent
+	print(`[Leaderboard] Registered {model:GetFullName()} (stat: {stat}, surface: {part.Name}).`)
 end
 
 -- Dane -----------------------------------------------------------------------

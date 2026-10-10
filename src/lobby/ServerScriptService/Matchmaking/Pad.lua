@@ -97,7 +97,7 @@ function Pad.new(model: Model, id: string): Pad?
 	billboard.Name = "MatchmakingBillboard"
 	billboard.Adornee = part
 	billboard.Size = UDim2.fromScale(10, 3.6) -- w studach, skaluje się z odległością
-	billboard.StudsOffsetWorldSpace = Vector3.new(0, worldExtents(part).Y / 2 + 4.5, 0)
+	billboard.StudsOffsetWorldSpace = Vector3.new(0, worldExtents(part).Y / 2 + 7, 0)
 	billboard.LightInfluence = 0
 	billboard.MaxDistance = 120
 	local countLabel = label(billboard, "Count", Enum.Font.FredokaOne, UDim2.new(), UDim2.fromScale(1, 0.58))

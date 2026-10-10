@@ -13,6 +13,7 @@ local Workspace = game:GetService("Workspace")
 require(ServerScriptService:WaitForChild("PlayerStats"))
 local Config = require(ReplicatedStorage:WaitForChild("MatchmakingConfig"))
 local Pad = require(script.Pad)
+local PadBuilder = require(script.PadBuilder)
 local Teleporter = require(script.Teleporter)
 
 type Pad = Pad.Pad
@@ -273,15 +274,27 @@ local function tryRegister(instance: Instance)
 		end
 	end
 
+	-- Biały model to tylko znacznik miejsca: budujemy w nim prawdziwy pad, a znacznik znika.
+	local model = instance
+	local parent = instance.Parent
+	if Config.ReplaceMarkers and not PadBuilder.IsBuilt(instance) then
+		if not instance:FindFirstChildWhichIsA("BasePart", true) then
+			warn(`[Matchmaking] {instance:GetFullName()} has no parts, cannot tell where the pad goes.`)
+			return
+		end
+		model = PadBuilder.Build(instance)
+	end
+
 	local id = `Pad{#pads + 1}`
-	local pad = Pad.new(instance, id)
+	local pad = Pad.new(model, id)
 	if not pad then
 		warn(`[Matchmaking] {instance:GetFullName()} has no BasePart to use as a pad, skipping.`)
 		return
 	end
 	table.insert(pads, pad)
 	padsById[id] = pad
-	print(`[Matchmaking] Registered {instance:GetFullName()} (zone: {pad.Part.Name}, max {pad.MaxPlayers}).`)
+	model.Parent = parent
+	print(`[Matchmaking] Registered {model:GetFullName()} (zone: {pad.Part.Name}, max {pad.MaxPlayers}).`)
 end
 
 for _, instance in Workspace:GetDescendants() do

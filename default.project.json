@@ -15,7 +15,7 @@
         "$path": "src/shared/PlayerStats.lua"
       },
       "Leaderboards": {
-        "$path": "src/lobby/ServerScriptService/Leaderboards.server.lua"
+        "$path": "src/lobby/ServerScriptService/Leaderboards"
       }
     },
     "StarterPlayer": {

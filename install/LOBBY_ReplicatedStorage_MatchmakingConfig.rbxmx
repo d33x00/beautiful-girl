@@ -49,6 +49,11 @@ Config.TeleportRetries = 3
 -- Modele w Workspace o nazwach Matchmaking, Matchmaking1, Matchmaking 2, Matchmaking_3 itd.
 Config.ModelNamePattern = "^matchmaking[%s_%-]*%d*$"
 
+-- true: modele Matchmaking to tylko znaczniki miejsca. Po starcie gry w ich miejscu
+-- powstaje gotowy pad (koło z obwódką), a znacznik jest usuwany.
+-- false: model zostaje i sam jest padem.
+Config.ReplaceMarkers = true
+
 -- Nazwy części (małymi literami), które są traktowane jako strefa padu.
 -- Bez takiej części używany jest PrimaryPart albo największa płaska część modelu.
 Config.PadPartNames = { "pad", "zone", "hitbox", "circle", "touch" }

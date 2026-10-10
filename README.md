@@ -37,7 +37,7 @@ Z Rojo: `rojo serve default.project.json` (lobby) i `rojo serve game.project.jso
 ## Konfiguracja (minimum)
 
 1. **Miejsce gry**: w Creator Hub dodaj do tego samego Experience drugie miejsce (Place) i wpisz jego PlaceId w `MatchmakingConfig.GamePlaceId`.
-2. **Pady**: modele w Workspace o nazwach `Matchmaking1`…`Matchmaking4` (działa też `Matchmaking 1`, `Matchmaking_1`). Strefą jest część o nazwie `Pad`/`Zone`/`Hitbox`/`Circle`/`Touch` albo z atrybutem `MatchmakingPad = true`; bez tego PrimaryPart lub największa płaska część. W Output zobaczysz `[Matchmaking] Registered ... (zone: X)` — sprawdź, czy wybrało dobrą część.
+2. **Pady**: modele w Workspace o nazwach `Matchmaking1`…`Matchmaking4` (działa też `Matchmaking 1`, `Matchmaking_1`) to **znaczniki miejsca**. Po starcie gry w miejscu każdego znacznika powstaje gotowy pad (jasne koło z białą obwódką, średnica = szerokość znacznika, 8–40 studów, na spodzie znacznika), a znacznik jest usuwany. W Studio (edycja) znaczniki zostają, żeby dało się je przesuwać. Wyłączenie: `Config.ReplaceMarkers = false` — wtedy model sam jest padem.
 3. **Wygrane**: domyślnie `leaderstats.Wins` albo atrybut `Wins` na graczu. Inne źródło → podmień `Config.GetWins`.
 4. Teleport działa tylko w opublikowanej grze, nie w Studio — tam po odliczaniu zobaczysz komunikat i pad się zresetuje (UI i party przetestujesz w Studio, teleport tylko w opublikowanej grze).
 
@@ -68,11 +68,12 @@ game.ServerStorage.ReturnToLobby:Fire({ player })  -- wybrani
 
 ## Topka (Leaderboard)
 
-Modele w Workspace o nazwie zaczynającej się od `Leaderboard` lub `Leadboard` dostają planszę w stylu farmy: czerwony nagłówek stodoły z białym obramowaniem, drewniane deski, złoto/srebro/brąz dla top 3, avatar, nick i wynik. Odświeża się co 60 s (licznik na dole planszy).
+Modele w Workspace o nazwie zaczynającej się od `Leaderboard` lub `Leadboard` to **znaczniki miejsca**. Po starcie gry w ich miejscu powstaje drewniana tablica (słupy, deska, belki, czerwony dwuspadowy daszek, dynie), a znacznik jest usuwany. Tablica ma szerokość i wysokość znacznika (8–30 / 9–30 studów), stoi na jego spodzie i jest obrócona wzdłuż dłuższego boku. Kolory zmienisz na górze `Leaderboards/BoardBuilder`.
 
-- **Ekran**: część o nazwie `Board`/`Screen`/`Display`/`Sign`/`Surface` albo z atrybutem `LeaderboardSurface = true`; bez tego największa część modelu. Napis pojawia się na obu dużych ścianach — jeśli jest odwrócony albo na złej ścianie, ustaw na modelu atrybut `Face` (`Front`, `Back`, `Left`, `Right`).
+Na desce: czerwony nagłówek z białym obramowaniem, drewniane rzędy, złoto/srebro/brąz dla top 3, avatar, nick i wynik — z obu stron tablicy. Odświeża się co 60 s (licznik na dole).
+
+- Chcesz zostawić własny model zamiast budowanej tablicy: `REPLACE_MARKERS = false` w `Leaderboards`. Wtedy ekranem jest część `Board`/`Screen`/`Display`/`Sign`/`Surface` (albo największa), a stronę wybierasz atrybutem `Face`.
 - **Atrybuty modelu (opcjonalne)**: `Stat` (domyślnie `Wins`), `Rows` (domyślnie 10), `Title` (domyślnie `TOP WINS`).
-- Jeśli model pochodzi z Toolboxa i ma własne skrypty/SurfaceGui, usuń je — w Output pojawi się ostrzeżenie, co koliduje.
 
 Dane: `PlayerStats` trzyma wygrane w DataStore (`leaderstats.Wins`, z tego korzysta też blokada trybów) i zapisuje je do OrderedDataStore, z którego czyta topka. Każda zmiana to atomowy `UpdateAsync`, więc lobby i serwery gry nie nadpisują sobie wyników.
 
